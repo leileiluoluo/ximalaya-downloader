@@ -7,41 +7,42 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
 const (
-	trackListURL = "https://www.ximalaya.com/revision/album/v1/getTracksList?albumId=%d&pageNum=%d"
-	audioURL     = "https://www.ximalaya.com/revision/play/v1/audio?id=%d&ptype=1"
+	trackListURL   = "https://www.ximalaya.com/revision/album/v1/getTracksList?albumId=%d&pageNum=%d"
+	audioURL       = "https://www.ximalaya.com/revision/play/v1/audio?id=%d&ptype=1"
+	audioExtension = ".m4a"
 )
 
 type result struct {
 	Data struct {
-		PageSize        int     `json:"pageSize"`
-		TrackTotalCount int     `json:"trackTotalCount"`
-		Tracks          []track `json:"tracks"`
+		PageSize   int     `json:"pageSize"`
+		TotalCount int     `json:"trackTotalCount"`
+		Tracks     []track `json:"tracks"`
 	} `json:"data"`
 }
 
 type track struct {
-	Index   int    `json:"index"`
-	Title   string `json:"title"`
-	TrackId int    `json:"trackId"`
+	AlbumTitle string `json:"albumTitle"`
+	Index      int    `json:"index"`
+	Title      string `json:"title"`
+	TrackId    int    `json:"trackId"`
 }
 
 func get(url string) ([]byte, error) {
 	// request
 	resp, err := http.Get(url)
 	if err != nil || http.StatusOK != resp.StatusCode {
-		msg := fmt.Sprintf("request error, statusCode: %d, err: %v\n", resp.StatusCode, err)
-		return nil, errors.New(msg)
+		return nil, fmt.Errorf("request error, statusCode: %d, err: %v", resp.StatusCode, err)
 	}
 
 	// read body
 	bytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		msg := fmt.Sprintf("body read error, err: %v\n", err)
-		return nil, errors.New(msg)
+		return nil, fmt.Errorf("body read error, err: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -49,57 +50,68 @@ func get(url string) ([]byte, error) {
 	return bytes, nil
 }
 
-func getTrackListByPage(albumId, pageNum int) (pageSize, trackTotalCount int, tracks []track) {
+func getTrackListByPageNum(albumId, pageNum int) (pageSize, totalCount int, tracks []track, err error) {
 	// prepare url
 	url := fmt.Sprintf(trackListURL, albumId, pageNum)
 
 	// get
 	bytes, err := get(url)
 	if err != nil {
-		fmt.Printf("error got: %v", err)
-		return 0, 0, tracks
+		return 0, 0, tracks, err
 	}
 
 	// json unmarshal
 	var rlt result
 	err = json.Unmarshal(bytes, &rlt)
 	if err != nil {
-		fmt.Printf("json unmarshal error, err: %v\n", err)
-		return 0, 0, tracks
+		return 0, 0, tracks, fmt.Errorf("json unmarshal error, err: %v", err)
 	}
 
 	// return
-	return rlt.Data.PageSize, rlt.Data.TrackTotalCount, rlt.Data.Tracks
+	return rlt.Data.PageSize, rlt.Data.TotalCount, rlt.Data.Tracks, nil
 }
 
-func getAllTrackList(albumId int) []track {
+func getAllTrackList(albumId int) ([]track, error) {
 	allTracks := []track{}
 
-	// round by round
-	pageSize, trackTotalCount, tracks := getTrackListByPage(albumId, 1)
+	// get track list by page number 1
+	pageSize, trackTotalCount, tracks, err := getTrackListByPageNum(albumId, 1)
+	if err != nil {
+		return allTracks, err
+	}
+
+	// album not exist?
+	if trackTotalCount <= 0 {
+		return allTracks, errors.New("album not exist")
+	}
 	allTracks = append(allTracks, tracks...)
 
+	// calculate total page
 	totalPages := trackTotalCount / pageSize
 	if trackTotalCount%pageSize > 0 {
 		totalPages = trackTotalCount/pageSize + 1
 	}
+
+	// get track list by page number 2 to n
 	for pageNum := 2; pageNum <= totalPages; pageNum++ {
-		_, _, tracks = getTrackListByPage(albumId, pageNum)
+		_, _, tracks, err = getTrackListByPageNum(albumId, pageNum)
+		if err != nil {
+			return allTracks, err
+		}
 		allTracks = append(allTracks, tracks...)
 	}
 
-	return allTracks
+	return allTracks, nil
 }
 
-func getAudioAddress(trackId int) string {
+func getAudioAddress(trackId int) (string, error) {
 	// prepare url
 	url := fmt.Sprintf(audioURL, trackId)
 
 	// get
 	bytes, err := get(url)
 	if err != nil {
-		fmt.Printf("error got: %v", err)
-		return ""
+		return "", err
 	}
 
 	// json unmarshal
@@ -110,30 +122,72 @@ func getAudioAddress(trackId int) string {
 	}
 	err = json.Unmarshal(bytes, &rlt)
 	if err != nil {
-		fmt.Printf("json unmarshal error, err: %v\n", err)
-		return ""
+		return "", fmt.Errorf("json unmarshal error, err: %v", err)
 	}
-	fmt.Println(rlt)
-	return rlt.Data.Src
+	return rlt.Data.Src, nil
+}
+
+func download(audioAddr, title, folder string) (filePath string, err error) {
+	// create folder if not exists
+	if _, err := os.Stat(folder); errors.Is(err, os.ErrNotExist) {
+		err := os.Mkdir(folder, os.ModePerm)
+		if err != nil {
+			return "", fmt.Errorf("make dir error: %v", err)
+		}
+	}
+
+	// get audio bytes
+	bytes, err := get(audioAddr)
+	if err != nil {
+		return "", fmt.Errorf("error got: %v", err)
+	}
+
+	// write to file
+	fileName := title + audioExtension
+	filePath = filepath.Join(folder, fileName)
+	err = ioutil.WriteFile(filePath, bytes, 0666)
+	if err != nil {
+		return filePath, fmt.Errorf("file write error: %v", err)
+	}
+
+	return filePath, nil
 }
 
 func main() {
-	// validation
+	// parameter validation
 	if len(os.Args) < 2 {
-		fmt.Println("please provide albumId")
-		os.Exit(1)
+		fmt.Println("please provide an album id")
+		return
 	}
 	albumId, err := strconv.Atoi(os.Args[1])
 	if err != nil {
-		fmt.Println("albumId should be an integer")
-		os.Exit(1)
+		fmt.Println("album id should be an integer")
+		return
 	}
-	fmt.Printf("albumId: %d\n", albumId)
+	fmt.Printf("album id: %d\n", albumId)
 
-	// getAllTrackList
-	tracks := getAllTrackList(albumId)
+	// get all track list
+	tracks, err := getAllTrackList(albumId)
+	if err != nil {
+		fmt.Printf("error in get all track list, err: %v\n", err)
+		return
+	}
+	fmt.Printf("all track list got, total: %d\n", len(tracks))
 
+	// get audio addresses
 	for _, track := range tracks {
-		getAudioAddress(track.TrackId)
+		audioAddr, err := getAudioAddress(track.TrackId)
+		if err != nil {
+			fmt.Printf("error in get audio address, err: %v\n", err)
+			break
+		}
+
+		// download
+		filePath, err := download(audioAddr, track.Title, track.AlbumTitle)
+		if err != nil {
+			fmt.Printf("error in audo download, err: %v\n", err)
+			continue
+		}
+		fmt.Printf("downloaded! file: %s\n", filePath)
 	}
 }
