@@ -32,17 +32,17 @@ type track struct {
 	TrackId    int    `json:"trackId"`
 }
 
-func get(url string) ([]byte, error) {
+func get(url string) (bytes []byte, err error) {
 	// request
 	resp, err := http.Get(url)
 	if err != nil || http.StatusOK != resp.StatusCode {
-		return nil, fmt.Errorf("request error, statusCode: %d, err: %v", resp.StatusCode, err)
+		return bytes, fmt.Errorf("request error, statusCode: %d, err: %v", resp.StatusCode, err)
 	}
 
 	// read body
-	bytes, err := ioutil.ReadAll(resp.Body)
+	bytes, err = ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("body read error, err: %v", err)
+		return bytes, fmt.Errorf("body read error, err: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -124,6 +124,12 @@ func getAudioAddress(trackId int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("json unmarshal error, err: %v", err)
 	}
+
+	if rlt.Data.Src == "" {
+		return "", errors.New("audo address can not required")
+	}
+
+	// return
 	return rlt.Data.Src, nil
 }
 
@@ -178,14 +184,14 @@ func main() {
 	for _, track := range tracks {
 		audioAddr, err := getAudioAddress(track.TrackId)
 		if err != nil {
-			fmt.Printf("error in get audio address, err: %v\n", err)
-			break
+			fmt.Printf("error in get audio address, title: %s, err: %v\n", track.Title, err)
+			continue
 		}
 
 		// download
 		filePath, err := download(audioAddr, track.Title, track.AlbumTitle)
 		if err != nil {
-			fmt.Printf("error in audo download, err: %v\n", err)
+			fmt.Printf("error in audo download, title: %s, err: %v\n", track.Title, err)
 			continue
 		}
 		fmt.Printf("downloaded! file: %s\n", filePath)
